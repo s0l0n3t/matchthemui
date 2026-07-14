@@ -38,62 +38,6 @@ interface ComparisonResult {
 // Lazy initialize Supabase to prevent startup crashes if variables are missing
 let supabaseClient: any = null;
 
-const SQL_SCRIPT = `-- Supabase SQL Editor'de çalıştırılacak fonksiyon:
--- 1. Ortak Takım Bulma Fonksiyonu:
-CREATE OR REPLACE FUNCTION public.get_common_clubs(p1_name_input text, p2_name_input text)
-RETURNS TABLE(club_id bigint, club_name text, logo_url text)
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  RETURN QUERY
-  SELECT 
-    c.id AS club_id, 
-    c.name::text AS club_name,
-    c.logo_url::text AS logo_url
-  FROM clubs c
-  JOIN player_clubs pc1 ON pc1.club_id = c.id
-  JOIN players p1 ON p1.id = pc1.player_id
-  JOIN player_clubs pc2 ON pc2.club_id = c.id
-  JOIN players p2 ON p2.id = pc2.player_id
-  WHERE LOWER(p1.name) = LOWER(p1_name_input) AND LOWER(p2.name) = LOWER(p2_name_input)
-  
-  -- Hızlı test için örnek statik veri:
-  UNION ALL
-  SELECT 123, 'Real Madrid'::text, 'https://upload.wikimedia.org/wikipedia/en/thumb/5/56/Real_Madrid_CF.svg/1200px-Real_Madrid_CF.svg.png'::text
-  WHERE LOWER(p1_name_input) LIKE '%ronaldo%' AND LOWER(p2_name_input) LIKE '%benzema%';
-END;
-$$;
-
--- 2. Oyuncu Arama Fonksiyonu:
-CREATE OR REPLACE FUNCTION public.search_players(search_term text)
-RETURNS TABLE(p_id bigint, p_name text, p_image_url text, p_club_name text)
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  RETURN QUERY
-  SELECT 
-    p.id AS p_id,
-    p.name::text AS p_name,
-    p.image_url::text AS p_image_url,
-    c.name::text AS p_club_name
-  FROM players p
-  LEFT JOIN player_clubs pc ON pc.player_id = p.id
-  LEFT JOIN clubs c ON c.id = pc.club_id
-  WHERE LOWER(p.name) LIKE '%' || LOWER(search_term) || '%'
-  LIMIT 5;
-
-  -- Test verisi
-  UNION ALL
-  SELECT 1, 'Cristiano Ronaldo'::text, 'https://upload.wikimedia.org/wikipedia/commons/8/8c/Cristiano_Ronaldo_2018.jpg'::text, 'Al Nassr'::text
-  WHERE LOWER('Cristiano Ronaldo') LIKE '%' || LOWER(search_term) || '%'
-  UNION ALL
-  SELECT 2, 'Karim Benzema'::text, 'https://upload.wikimedia.org/wikipedia/commons/e/ec/Karim_Benzema_wearing_Real_Madrid_home_kit_2021-2022.jpg'::text, 'Al-Ittihad'::text
-  WHERE LOWER('Karim Benzema') LIKE '%' || LOWER(search_term) || '%';
-END;
-$$;`;
-
 const isSupabaseConfigured = !!(
   (import.meta as any).env.VITE_SUPABASE_URL &&
   (import.meta as any).env.VITE_SUPABASE_ANON_KEY
@@ -105,7 +49,7 @@ function getSupabase() {
     const anonKey = (import.meta as any).env.VITE_SUPABASE_ANON_KEY;
     if (!url || !anonKey) {
       throw new Error(
-        "Supabase bağlantısı kurulamadı. Lütfen ortam değişkenlerini (VITE_SUPABASE_URL ve VITE_SUPABASE_ANON_KEY) tanımlayınız."
+        "Supabase bağlantısı kurulamadı."
       );
     }
     supabaseClient = createClient(url, anonKey);
@@ -484,69 +428,6 @@ export default function App() {
               </motion.div>
             )}
 
-            {/* Supabase Configuration Guide */}
-            {!isSupabaseConfigured && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="w-full mb-6 p-5 bg-indigo-950/20 border border-indigo-500/20 rounded-2xl text-left space-y-4"
-              >
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
-                  <div>
-                    <h4 className="text-sm font-bold text-white tracking-wide">Supabase Bağlantısı Gerekli</h4>
-                    <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
-                      Bu uygulama, futbolcuların ortak takımlarını bulmak için Supabase RPC (Remote Procedure Call) işlevini kullanmaktadır. Devam etmek için ortam değişkenlerini tanımlamalısınız.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="space-y-2 border-t border-neutral-900 pt-3 text-xs text-neutral-300">
-                  <p className="font-semibold text-neutral-400">Kurulum Adımları:</p>
-                  <ol className="list-decimal pl-4 space-y-1.5 text-neutral-400">
-                    <li>
-                      Sol menüdeki <span className="text-white font-medium">Settings (Ayarlar)</span> sekmesini açın.
-                    </li>
-                    <li>
-                      <code className="bg-neutral-900 px-1.5 py-0.5 rounded text-indigo-300">VITE_SUPABASE_URL</code> ve <code className="bg-neutral-900 px-1.5 py-0.5 rounded text-indigo-300">VITE_SUPABASE_ANON_KEY</code> değişkenlerini ekleyin.
-                    </li>
-                    <li>
-                      Supabase SQL Editörünüzde aşağıdaki SQL fonksiyonunu çalıştırın:
-                    </li>
-                  </ol>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs text-neutral-500 font-bold tracking-wider uppercase">
-                    <span>SQL SCRIPT</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(SQL_SCRIPT);
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
-                      }}
-                      className="text-indigo-400 hover:text-indigo-300 cursor-pointer transition-colors flex items-center gap-1"
-                    >
-                      {copied ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-green-400" />
-                          <span>Kopyalandı!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Kopyala</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <pre className="bg-neutral-900/90 p-3 rounded-xl border border-neutral-800 text-[10px] text-neutral-300 overflow-x-auto max-h-36 font-mono leading-relaxed select-text">
-                    {SQL_SCRIPT}
-                  </pre>
-                </div>
-              </motion.div>
-            )}
 
             {/* Bottom Button */}
             {!result && (
