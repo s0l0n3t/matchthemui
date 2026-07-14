@@ -1,0 +1,6 @@
+{
+  "name": "Futbol Ortak Takım Bulucu",
+  "description": "İki futbolcu arasındaki ortak oynadıkları futbol takımını bulan ve modern bir karanlık arayüzde sunan yapay zeka destekli veritabanı kıyaslama uygulaması.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
