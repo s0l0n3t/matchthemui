@@ -57,13 +57,64 @@ function getSupabase() {
   return supabaseClient;
 }
 
+// Veritabanından gelen "İsim (ID)" formatındaki sondaki parantezi temizler
+function stripId(name: string) {
+  if (!name) return "";
+  return name.replace(/\s*\(\d+\)\s*$/, "").trim();
+}
+
 function getInitials(name: string) {
   if (!name) return "?";
-  const parts = name.split(" ").filter(Boolean);
+  const clean = stripId(name);
+  const parts = clean.split(" ").filter(Boolean);
   if (parts.length >= 2) {
     return (parts[0][0] + parts[1][0]).toUpperCase();
   }
-  return name.substring(0, 2).toUpperCase();
+  return clean.substring(0, 2).toUpperCase();
+}
+
+// Birden fazla oyuncunun son kulübünü toplu çeker (autocomplete için)
+// get_player_clubs RPC'si → ilk eleman = son kulüp
+async function fetchLatestClubsForPlayers(playerIds: number[]): Promise<Map<number, string>> {
+  const result = new Map<number, string>();
+  if (playerIds.length === 0) return result;
+
+  try {
+    const supabase = getSupabase();
+
+    const promises = playerIds.map(async (pid) => {
+      const { data, error } = await supabase.rpc("get_player_clubs", {
+        p_id: pid,
+      });
+      if (!error && data && data.length > 0) {
+        const latestClub = stripId(data[0].club_name);
+        if (latestClub) result.set(pid, latestClub);
+      }
+    });
+
+    await Promise.all(promises);
+  } catch (err) {
+    // Hata olursa sessizce boş dön
+  }
+
+  return result;
+}
+
+// Bir oyuncunun tüm geçmiş kulüplerini çeker (sonuç ekranı için)
+// get_player_clubs RPC'si → tüm kulüpler sıralı döner
+async function fetchPlayerAllClubs(playerId: number): Promise<string[]> {
+  try {
+    const supabase = getSupabase();
+    const { data, error } = await supabase.rpc("get_player_clubs", {
+      p_id: playerId,
+    });
+    if (!error && data && data.length > 0) {
+      return data.map((c: any) => stripId(c.club_name)).filter(Boolean);
+    }
+    return [];
+  } catch (err) {
+    return [];
+  }
 }
 
 function PlayerAutocomplete({
@@ -71,6 +122,7 @@ function PlayerAutocomplete({
   placeholder,
   value,
   onChange,
+  onSelectPlayer,
   disabled,
   isConfigured,
   onErrorClear
@@ -79,6 +131,7 @@ function PlayerAutocomplete({
   placeholder: string;
   value: string;
   onChange: (val: string) => void;
+  onSelectPlayer: (id: number, name: string) => void;
   disabled: boolean;
   isConfigured: boolean;
   onErrorClear: () => void;
@@ -117,8 +170,15 @@ function PlayerAutocomplete({
         const { data, error } = await supabase.rpc("search_players", {
           search_term: searchTerm
         });
-        if (!error && data) {
-          setResults(data);
+        if (!error && data && data.length > 0) {
+          // Son kulüp bilgisini player_history'den çek
+          const playerIds = data.map((p: SupabasePlayer) => p.p_id);
+          const clubMap = await fetchLatestClubsForPlayers(playerIds);
+          const enriched = data.map((p: SupabasePlayer) => ({
+            ...p,
+            p_club_name: clubMap.get(p.p_id) || ""
+          }));
+          setResults(enriched);
         } else {
           setResults([]);
         }
@@ -133,8 +193,9 @@ function PlayerAutocomplete({
   }, [query, isOpen, isConfigured]);
 
   const handleSelect = (player: SupabasePlayer) => {
-    setQuery(player.p_name);
-    onChange(player.p_name);
+    setQuery(stripId(player.p_name));
+    onChange(stripId(player.p_name));
+    onSelectPlayer(player.p_id, stripId(player.p_name));
     setIsOpen(false);
     onErrorClear();
   };
@@ -189,8 +250,8 @@ function PlayerAutocomplete({
                       )}
                     </div>
                     <div className="flex-1 min-w-0 text-left">
-                      <p className="text-sm font-semibold text-neutral-200 truncate">{player.p_name}</p>
-                      <p className="text-[11px] text-neutral-500 truncate">{player.p_club_name || "Kulüp bilgisi yok"}</p>
+                      <p className="text-sm font-semibold text-neutral-200 truncate">{stripId(player.p_name)}</p>
+                      <p className="text-[11px] text-neutral-500 truncate">{stripId(player.p_club_name) || "Kulüp bilgisi yok"}</p>
                     </div>
                   </li>
                 ))}
@@ -210,6 +271,11 @@ function PlayerAutocomplete({
 export default function App() {
   const [player1, setPlayer1] = useState("");
   const [player2, setPlayer2] = useState("");
+  const [player1Id, setPlayer1Id] = useState<number | null>(null);
+  const [player2Id, setPlayer2Id] = useState<number | null>(null);
+  const [commonClubs, setCommonClubs] = useState<SupabaseClub[]>([]);
+  const [player1History, setPlayer1History] = useState<string[]>([]);
+  const [player2History, setPlayer2History] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<ComparisonResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -217,27 +283,29 @@ export default function App() {
 
   const handleCompare = async (e: FormEvent) => {
     e.preventDefault();
-    if (!player1.trim() || !player2.trim()) {
-      setErrorMsg("Lütfen her iki futbolcunun adını da giriniz.");
+    if (!player1Id || !player2Id) {
+      setErrorMsg("Lütfen her iki futbolcuyu da listeden seçiniz.");
       return;
     }
 
-    if (player1.trim().toLowerCase() === player2.trim().toLowerCase()) {
-      setErrorMsg("Lütfen iki farklı futbolcu ismi giriniz.");
+    if (player1Id === player2Id) {
+      setErrorMsg("Lütfen iki farklı futbolcu seçiniz.");
       return;
     }
 
     setIsLoading(true);
     setErrorMsg(null);
     setResult(null);
+    setCommonClubs([]);
+    setPlayer1History([]);
+    setPlayer2History([]);
 
     try {
       const supabase = getSupabase();
-      
-      // Call the RPC function 'get_common_clubs'
+
       const { data, error } = await supabase.rpc("get_common_clubs", {
-        p1_name_input: player1.trim(),
-        p2_name_input: player2.trim(),
+        p1_id: parseInt(String(player1Id)),
+        p2_id: parseInt(String(player2Id)),
       });
 
       if (error) {
@@ -245,6 +313,15 @@ export default function App() {
       }
 
       const clubsList = (data || []) as SupabaseClub[];
+      setCommonClubs(clubsList);
+
+      // Her iki oyuncunun geçmiş kulüplerini tooltip için çek
+      const [p1Clubs, p2Clubs] = await Promise.all([
+        fetchPlayerAllClubs(player1Id!),
+        fetchPlayerAllClubs(player2Id!)
+      ]);
+      setPlayer1History(p1Clubs);
+      setPlayer2History(p2Clubs);
 
       if (clubsList.length > 0) {
         setResult({
@@ -263,7 +340,6 @@ export default function App() {
         setErrorMsg("Bu iki oyuncunun ortak oynadığı takım bulunamadı");
       }
     } catch (error: any) {
-      console.error("Supabase RPC hatası:", error);
       setErrorMsg(
         error.message || "Veritabanından sorgulama yapılırken bir hata oluştu. Lütfen bağlantılarınızı ve ortam değişkenlerinizi kontrol edin."
       );
@@ -275,6 +351,11 @@ export default function App() {
   const handleReset = () => {
     setPlayer1("");
     setPlayer2("");
+    setPlayer1Id(null);
+    setPlayer2Id(null);
+    setCommonClubs([]);
+    setPlayer1History([]);
+    setPlayer2History([]);
     setResult(null);
     setErrorMsg(null);
     setIsLoading(false);
@@ -325,10 +406,10 @@ export default function App() {
       <div className="w-full max-w-md md:max-w-xl flex flex-col items-stretch">
         
         {/* Simple Interface Card containing all elements */}
-        <div className="bg-neutral-950 border border-neutral-900 rounded-3xl p-8 md:p-10 shadow-2xl relative overflow-hidden">
+        <div className="bg-neutral-950 border border-neutral-900 rounded-3xl p-8 md:p-10 shadow-2xl relative overflow-visible">
           
           {/* Subtle background gradient glow */}
-          <div className="absolute top-0 left-1/4 w-1/2 h-20 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
+          <div className="absolute top-0 left-1/4 w-1/2 h-20 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none -z-10" />
 
           {/* Brand / Title Header inside the frame */}
           <header className="text-center mb-8 border-b border-neutral-900 pb-6">
@@ -355,7 +436,8 @@ export default function App() {
                 label="1. Oyuncu"
                 placeholder="Cristiano Ronaldo"
                 value={player1}
-                onChange={setPlayer1}
+                onChange={(val) => { setPlayer1(val); setPlayer1Id(null); }}
+                onSelectPlayer={(id, name) => { setPlayer1(name); setPlayer1Id(id); }}
                 disabled={isLoading}
                 isConfigured={isSupabaseConfigured}
                 onErrorClear={() => { if (errorMsg) setErrorMsg(null); }}
@@ -401,7 +483,8 @@ export default function App() {
                 label="2. Oyuncu"
                 placeholder="Karim Benzema"
                 value={player2}
-                onChange={setPlayer2}
+                onChange={(val) => { setPlayer2(val); setPlayer2Id(null); }}
+                onSelectPlayer={(id, name) => { setPlayer2(name); setPlayer2Id(id); }}
                 disabled={isLoading}
                 isConfigured={isSupabaseConfigured}
                 onErrorClear={() => { if (errorMsg) setErrorMsg(null); }}
@@ -501,14 +584,14 @@ export default function App() {
                         >
                           <div className="w-12 h-12 rounded-lg bg-white/5 border border-neutral-800/50 flex items-center justify-center shrink-0 overflow-hidden p-1 group-hover:border-indigo-500/30 transition-all duration-300">
                             {club.logo_url ? (
-                              <img src={club.logo_url} alt={club.club_name} className="w-full h-full object-contain" />
+                              <img src={club.logo_url} alt={stripId(club.club_name)} className="w-full h-full object-contain" />
                             ) : (
                               <Trophy className="w-6 h-6 text-neutral-500" />
                             )}
                           </div>
                           <div className="text-left overflow-hidden">
-                            <h3 className="font-bold text-white text-sm md:text-base truncate" title={club.club_name}>
-                              {club.club_name}
+                            <h3 className="font-bold text-white text-sm md:text-base truncate" title={stripId(club.club_name)}>
+                              {stripId(club.club_name)}
                             </h3>
                           </div>
                         </div>
@@ -516,13 +599,39 @@ export default function App() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-3 text-sm">
-                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg text-center">
+                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg text-center relative group/p1">
                         <p className="text-[11px] text-neutral-500 uppercase font-bold">1. Oyuncu</p>
-                        <p className="font-semibold text-neutral-200 mt-1 text-sm md:text-base truncate">{result.player1}</p>
+                        <p className="font-semibold text-neutral-200 mt-1 text-sm md:text-base truncate cursor-pointer">{stripId(result.player1)}</p>
+                        {player1History.length > 0 && (
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/p1:block z-50 pointer-events-none">
+                            <div className="bg-neutral-800 border border-neutral-700 rounded-xl p-3 shadow-2xl min-w-[180px] max-w-[240px]">
+                              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Geçmiş Kulüpler</p>
+                              <div className="space-y-1">
+                                {player1History.map((club, i) => (
+                                  <p key={i} className="text-xs text-neutral-300 truncate">• {club}</p>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="w-2 h-2 bg-neutral-800 border-r border-b border-neutral-700 rotate-45 absolute left-1/2 -translate-x-1/2 -bottom-1" />
+                          </div>
+                        )}
                       </div>
-                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg text-center">
+                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg text-center relative group/p2">
                         <p className="text-[11px] text-neutral-500 uppercase font-bold">2. Oyuncu</p>
-                        <p className="font-semibold text-neutral-200 mt-1 text-sm md:text-base truncate">{result.player2}</p>
+                        <p className="font-semibold text-neutral-200 mt-1 text-sm md:text-base truncate cursor-pointer">{stripId(result.player2)}</p>
+                        {player2History.length > 0 && (
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/p2:block z-50 pointer-events-none">
+                            <div className="bg-neutral-800 border border-neutral-700 rounded-xl p-3 shadow-2xl min-w-[180px] max-w-[240px]">
+                              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Geçmiş Kulüpler</p>
+                              <div className="space-y-1">
+                                {player2History.map((club, i) => (
+                                  <p key={i} className="text-xs text-neutral-300 truncate">• {club}</p>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="w-2 h-2 bg-neutral-800 border-r border-b border-neutral-700 rotate-45 absolute left-1/2 -translate-x-1/2 -bottom-1" />
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -539,14 +648,32 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg text-center">
-                        <p className="text-[11px] text-neutral-500 font-bold uppercase">{result.player1}</p>
-                        <p className="text-xs text-neutral-400 mt-1">Takım bulunamadı</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg">
+                        <p className="text-[11px] text-neutral-500 font-bold uppercase text-center mb-2">{stripId(result.player1)}</p>
+                        <div className="border-t border-neutral-800/50 pt-2 space-y-1">
+                          <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">Geçmiş Kulüpler</p>
+                          {player1History.length > 0 ? (
+                            player1History.map((club, i) => (
+                              <p key={i} className="text-xs text-neutral-400 truncate">• {club}</p>
+                            ))
+                          ) : (
+                            <p className="text-xs text-neutral-600 italic">Veri bulunamadı</p>
+                          )}
+                        </div>
                       </div>
-                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg text-center">
-                        <p className="text-[11px] text-neutral-500 font-bold uppercase">{result.player2}</p>
-                        <p className="text-xs text-neutral-400 mt-1">Takım bulunamadı</p>
+                      <div className="bg-neutral-900/20 border border-neutral-850 p-3 rounded-lg">
+                        <p className="text-[11px] text-neutral-500 font-bold uppercase text-center mb-2">{stripId(result.player2)}</p>
+                        <div className="border-t border-neutral-800/50 pt-2 space-y-1">
+                          <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">Geçmiş Kulüpler</p>
+                          {player2History.length > 0 ? (
+                            player2History.map((club, i) => (
+                              <p key={i} className="text-xs text-neutral-400 truncate">• {club}</p>
+                            ))
+                          ) : (
+                            <p className="text-xs text-neutral-600 italic">Veri bulunamadı</p>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
